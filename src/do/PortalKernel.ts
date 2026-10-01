@@ -1,4 +1,6 @@
-import { KernelEnvelope, KernelResult, resolveUmbrellaMode, UmbrellaMode, createEnvelope, failureResponse, readKernelResult, resultResponse } from '../kernel-bridge';
+import type { KernelEnvelope, KernelResult, UmbrellaMode } from '../contracts';
+import { resolveUmbrellaMode, failureResponse, readKernelResult, resultResponse } from '../kernel-bridge';
+import { hydrateContext } from '../lane-execution-context';
 
 type UniverseState = {
   tick: number;
@@ -8,12 +10,14 @@ type UniverseState = {
 
 type PortalKernelEnv = {
   UMBRELLA_ENFORCEMENT?: string;
+  PLANETARY_MODE?: string;
 };
 
 export class PortalKernel {
   private state: DurableObjectState;
   private env: PortalKernelEnv;
   private universeState: UniverseState | null = null;
+  private entropyTick: number = 0;
 
   constructor(state: DurableObjectState, env: PortalKernelEnv) {
     this.state = state;
@@ -47,10 +51,17 @@ export class PortalKernel {
       return failureResponse('INVALID_MESSAGE', 'Envelope must include id, type, payload, identity, and governanceContext', 400);
     }
 
+    // Increment entropy tick per Phase-12 invariant
+    this.entropyTick++;
+    envelope.entropyTick = this.entropyTick;
+
+    // Propagate planetary mode
+    if (!envelope.planetaryMode) {
+      envelope.planetaryMode = this.env.PLANETARY_MODE ?? 'default';
+    }
+
     const mode = resolveUmbrellaMode(
-      typeof envelope.governanceContext.umbrellaMode === 'string'
-        ? (envelope.governanceContext.umbrellaMode as string)
-        : this.env.UMBRELLA_ENFORCEMENT
+      typeof envelope.governanceContext.umbrellaMode === 'string' ? (envelope.governanceContext.umbrellaMode as string) : this.env.UMBRELLA_ENFORCEMENT
     );
 
     // Check governance denials
@@ -58,17 +69,20 @@ export class PortalKernel {
       return failureResponse('FORBIDDEN', 'Operation denied by governance', 403);
     }
 
+    // Hydrate lane execution context for all operations
+    const context = hydrateContext(envelope, mode, envelope.planetaryMode, this.entropyTick, this.state.storage ?? {});
+
     // Handle specific operation types
     if (envelope.type === 'universe.state') {
-      return this.handleUniverseState(envelope, mode);
+      return this.handleUniverseState(envelope, mode, context);
     }
 
     if (envelope.type === 'universe.tick') {
-      return this.handleUniverseTick(envelope, mode);
+      return this.handleUniverseTick(envelope, mode, context);
     }
 
     if (envelope.type === 'umbrella.os') {
-      return this.handleUmbrellaOS(envelope, mode);
+      return this.handleUmbrellaOS(envelope, mode, context);
     }
 
     // Check lane access policy
@@ -97,7 +111,7 @@ export class PortalKernel {
                     operation: envelope.type,
                     accepted: true,
                   },
-                  meta: { source: 'PortalKernel', governance: mode },
+                  meta: { source: 'PortalKernel', governance: mode, planetaryMode: context.planetaryMode },
                 },
               },
             ],
@@ -114,13 +128,18 @@ export class PortalKernel {
           decision: mode === 'off' ? 'bypassed' : mode === 'advisory' ? 'advisory' : 'allowed',
           deltas: [],
         },
+        identityCurvature: context.identityCurvature,
+        entropyTick: this.entropyTick,
+        planetaryMode: context.planetaryMode,
+        umbrellaEnforcement: mode,
+        laneRouting: envelope.laneRouting ?? {},
       },
     };
 
     return resultResponse(result, 200);
   }
 
-  private async handleUniverseState(envelope: KernelEnvelope, mode: UmbrellaMode): Promise<Response> {
+  private async handleUniverseState(envelope: KernelEnvelope, mode: UmbrellaMode, context: any): Promise<Response> {
     const state = await this.getUniverseState();
 
     const result: KernelResult = {
@@ -134,7 +153,7 @@ export class PortalKernel {
               {
                 result: {
                   data: state,
-                  meta: { source: 'PortalKernel', governance: mode },
+                  meta: { source: 'PortalKernel', governance: mode, planetaryMode: context.planetaryMode },
                 },
               },
             ],
@@ -151,13 +170,18 @@ export class PortalKernel {
           decision: mode === 'off' ? 'bypassed' : mode === 'advisory' ? 'advisory' : 'allowed',
           deltas: [],
         },
+        identityCurvature: context.identityCurvature,
+        entropyTick: this.entropyTick,
+        planetaryMode: context.planetaryMode,
+        umbrellaEnforcement: mode,
+        laneRouting: envelope.laneRouting ?? {},
       },
     };
 
     return resultResponse(result, 200);
   }
 
-  private async handleUniverseTick(envelope: KernelEnvelope, mode: UmbrellaMode): Promise<Response> {
+  private async handleUniverseTick(envelope: KernelEnvelope, mode: UmbrellaMode, context: any): Promise<Response> {
     const state = await this.getUniverseState();
 
     // Apply changes deterministically
@@ -189,7 +213,7 @@ export class PortalKernel {
               {
                 result: {
                   data: state,
-                  meta: { source: 'PortalKernel', governance: mode },
+                  meta: { source: 'PortalKernel', governance: mode, planetaryMode: context.planetaryMode },
                 },
               },
             ],
@@ -206,13 +230,18 @@ export class PortalKernel {
           decision: mode === 'off' ? 'bypassed' : mode === 'advisory' ? 'advisory' : 'allowed',
           deltas: [],
         },
+        identityCurvature: context.identityCurvature,
+        entropyTick: this.entropyTick,
+        planetaryMode: context.planetaryMode,
+        umbrellaEnforcement: mode,
+        laneRouting: envelope.laneRouting ?? {},
       },
     };
 
     return resultResponse(result, 200);
   }
 
-  private async handleUmbrellaOS(envelope: KernelEnvelope, mode: UmbrellaMode): Promise<Response> {
+  private async handleUmbrellaOS(envelope: KernelEnvelope, mode: UmbrellaMode, context: any): Promise<Response> {
     const permissions = envelope.payload.permissions as Record<string, unknown> | undefined;
 
     const result: KernelResult = {
@@ -236,7 +265,7 @@ export class PortalKernel {
                     osGovernanceFlags: {},
                     osTruthInvariants: { structuralTruth: true },
                   },
-                  meta: { source: 'PortalKernel', governance: mode },
+                  meta: { source: 'PortalKernel', governance: mode, planetaryMode: context.planetaryMode },
                 },
               },
             ],
@@ -253,6 +282,11 @@ export class PortalKernel {
           decision: mode === 'off' ? 'bypassed' : mode === 'advisory' ? 'advisory' : 'allowed',
           deltas: [],
         },
+        identityCurvature: context.identityCurvature,
+        entropyTick: this.entropyTick,
+        planetaryMode: context.planetaryMode,
+        umbrellaEnforcement: mode,
+        laneRouting: envelope.laneRouting ?? {},
       },
     };
 
